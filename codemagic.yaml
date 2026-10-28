@@ -1,0 +1,52 @@
+# Codemagic 构建配置：GlobalRefresh-PiP 社区补丁版（未签名 IPA）
+# 配合仓库根目录的 GlobalRefresh-PiP-all-callbacks-5x-20261028.zip 使用：
+# 本文件解压 zip 后再构建，因此仓库里只需要 2 个文件：
+#   1) GlobalRefresh-PiP-all-callbacks-5x-20261028.zip（补丁源码包）
+#   2) 本文件 codemagic.yaml（可通过 GitHub 网页 "Create new file" 粘贴创建）
+# 构建产物为未签名 IPA，下载后用自己的 Apple ID 自签安装。
+
+workflows:
+  ios-unsigned-patched:
+    name: iOS unsigned IPA (community patched)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Unzip source bundle
+        script: |
+          set -e
+          unzip -q GlobalRefresh-PiP-all-callbacks-5x-20261028.zip
+          test -d GlobalRefresh-PiP-patched/pip_swift/pip_swift.xcworkspace
+      - name: Install CocoaPods dependencies
+        script: |
+          cd GlobalRefresh-PiP-patched/pip_swift
+          pod install
+      - name: Archive without code signing
+        script: |
+          set -e
+          cd GlobalRefresh-PiP-patched/pip_swift
+          xcodebuild \
+            -workspace pip_swift.xcworkspace \
+            -scheme pip_swift \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$CM_BUILD_DIR/build/pip_swift.xcarchive" \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+      - name: Package unsigned IPA
+        script: |
+          set -e
+          APP_PATH="$CM_BUILD_DIR/build/pip_swift.xcarchive/Products/Applications/pip_swift.app"
+          test -d "$APP_PATH" || { echo "archive .app not found"; exit 1; }
+          PKG_DIR="$CM_BUILD_DIR/build/ipa-payload"
+          rm -rf "$PKG_DIR" && mkdir -p "$PKG_DIR/Payload"
+          cp -R "$APP_PATH" "$PKG_DIR/Payload/"
+          cd "$PKG_DIR"
+          zip -qry "$CM_BUILD_DIR/build/GlobalRefresh_1.1.1_patched_unsigned.ipa" Payload
+          echo "--- SHA-256 ---"
+          shasum -a 256 "$CM_BUILD_DIR/build/GlobalRefresh_1.1.1_patched_unsigned.ipa"
+    artifacts:
+      - build/GlobalRefresh_1.1.1_patched_unsigned.ipa
