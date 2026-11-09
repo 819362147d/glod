@@ -29,9 +29,14 @@ workflows:
           cp extreme-overrides/FrameRateTestTabBarController.swift "$SRC_DIR/"
           cp extreme-overrides/UnifiedDisplayLinkDispatcher.swift "$SRC_DIR/"
           cp extreme-overrides/ViewController.swift "$SRC_DIR/"
+          cp extreme-overrides/AppDebugLogger.swift "$SRC_DIR/"
+          cp extreme-overrides/KeepAliveLogger.swift "$SRC_DIR/"
           grep -q "ExtremeRefreshLock" "$SRC_DIR/UnifiedDisplayLinkDispatcher.swift"
           grep -q "pipBackingCompositionFrameDuration" "$SRC_DIR/ViewController.swift"
-          echo "Extreme-lock overrides applied."
+          grep -q "standardFrameRates" "$SRC_DIR/ViewController.swift"
+          grep -q "private static let deviceModelIdentifier" "$SRC_DIR/AppDebugLogger.swift"
+          grep -q "Do not force a synchronous preferences flush" "$SRC_DIR/KeepAliveLogger.swift"
+          echo "Extreme-lock and performance overrides applied."
       - name: Install CocoaPods dependencies
         script: |
           cd GlobalRefresh-PiP-patched/pip_swift

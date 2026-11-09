@@ -372,6 +372,13 @@ class ViewController: UIViewController, AVPictureInPictureControllerDelegate {
     private var isCompactPiPStyle = true
     private let clockFPSMeasureInterval: CFTimeInterval = 0.8
     private let clockNetworkMeasureInterval: CFTimeInterval = 1.0
+    // Performance patch: the standard rate table depends only on the device's
+    // maximum refresh rate, so compute it once instead of filtering an array
+    // on every FPS measurement tick.
+    private static let standardFrameRates: [Int] = {
+        let hardwareMaximum = max(60, UIScreen.main.maximumFramesPerSecond)
+        return [30, 45, 60, 75, 80, 90, 100, 120].filter { $0 <= hardwareMaximum }
+    }()
     private var isLoadingHomePreferences = false
     private var hasPreparedPiPInfrastructure = false
     private var wantsPiPActive = false
@@ -1544,8 +1551,13 @@ class ViewController: UIViewController, AVPictureInPictureControllerDelegate {
             "lockAudioBoost=\(isLockScreenAudioBoostActive)"
         ].joined(separator: ",")
         DiagnosticsRuntimeState.updatePiPState(state)
-        DiagnosticsRuntimeState.updatePiPSurfaceState(pipSurfaceDiagnosticsText)
-        updateDisplaySleepDiagnostics()
+        // Performance patch: the surface/sleep texts format dozens of view,
+        // layer and player fields, but their only consumers are debug and
+        // diagnostics exports. Skip building them while diagnostics are off.
+        if AppDebugLogger.isDebugModeEnabled || DebugDiagnosticsMonitor.isEnabled {
+            DiagnosticsRuntimeState.updatePiPSurfaceState(pipSurfaceDiagnosticsText)
+            updateDisplaySleepDiagnostics()
+        }
     }
 
     private func logPiPCompetitionProbe(_ event: String, controller: AVPictureInPictureController? = nil) {
@@ -1597,6 +1609,9 @@ class ViewController: UIViewController, AVPictureInPictureControllerDelegate {
     }
 
     private func updateDisplaySleepDiagnostics(reason: String? = nil, shouldLog: Bool = false) {
+        // Performance patch: callers that explicitly request a log keep the
+        // old behavior; otherwise this text is only consumed by diagnostics.
+        guard shouldLog || AppDebugLogger.isDebugModeEnabled || DebugDiagnosticsMonitor.isEnabled else { return }
         let text = displaySleepDiagnosticsText
         DiagnosticsRuntimeState.updateDisplaySleepState(text)
         guard shouldLog else { return }
@@ -3917,8 +3932,13 @@ class ViewController: UIViewController, AVPictureInPictureControllerDelegate {
         let normalizedFPS = normalizedMeasuredFPS(instantFPS)
 
         // 调试日志：查看 DisplayLink 实际读到的刷新率
+        // Performance patch: this branch is the only path that can continue
+        // to the confirmation check below, so read the preference once here
+        // and reuse it instead of looking it up again a few lines later.
+        var forceHighRefreshEnabled = false
         if measuredPiPFPS != normalizedFPS {
-            AppDebugLogger.log("FPS probe: instant=\(instantFPS), normalized=\(normalizedFPS), current=\(measuredPiPFPS), force120Hz=\(FrameRatePreference.isHighRefreshEnabled)")
+            forceHighRefreshEnabled = FrameRatePreference.isHighRefreshEnabled
+            AppDebugLogger.log("FPS probe: instant=\(instantFPS), normalized=\(normalizedFPS), current=\(measuredPiPFPS), force120Hz=\(forceHighRefreshEnabled)")
         }
 
         if measuredPiPFPS == 0 {
@@ -3947,7 +3967,7 @@ class ViewController: UIViewController, AVPictureInPictureControllerDelegate {
         let confirmation = fpsConfirmationRequirement(
             from: measuredPiPFPS,
             to: normalizedFPS,
-            forceHighRefreshEnabled: FrameRatePreference.isHighRefreshEnabled
+            forceHighRefreshEnabled: forceHighRefreshEnabled
         )
         let pendingDuration = timestamp - (pendingMeasuredPiPFPSStartedAt ?? timestamp)
         if pendingMeasuredPiPFPSCount >= confirmation.count && pendingDuration >= confirmation.duration {
@@ -4033,7 +4053,7 @@ class ViewController: UIViewController, AVPictureInPictureControllerDelegate {
     private func normalizedMeasuredFPS(_ rawFPS: Int) -> Int {
         let hardwareMaximum = max(60, UIScreen.main.maximumFramesPerSecond)
         let clampedFPS = min(max(30, rawFPS), hardwareMaximum)
-        let standardRates = [30, 45, 60, 75, 80, 90, 100, 120].filter { $0 <= hardwareMaximum }
+        let standardRates = Self.standardFrameRates
         guard let nearest = standardRates.min(by: { abs($0 - clampedFPS) < abs($1 - clampedFPS) }) else {
             return clampedFPS
         }

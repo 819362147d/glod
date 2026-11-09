@@ -6,7 +6,8 @@
 ## 实现方式（不改动原 zip）
 
 仓库根目录 `codemagic.yaml` 在解压源码包后、构建前，会用 `extreme-overrides/`
-里的 3 个同名文件覆盖 `GlobalRefresh-PiP-patched/pip_swift/pip_swift/` 下的源码，
+里的同名文件覆盖 `GlobalRefresh-PiP-patched/pip_swift/pip_swift/` 下的源码
+（极限锁帧 3 个文件；2026-11-09 性能补丁后共 5 个文件），
 其余步骤与原版一致。想回退原版：删掉 codemagic.yaml 里的
 "Apply extreme-lock overrides" 步骤即可（或直接关掉 App 内的开关）。
 
@@ -37,6 +38,65 @@
 - 统一调度器的严格 120 区间在两个既有开关默认开启时本来就生效；
   本补丁的增量是让它**独立于那两个开关**（例如做帧率检测临时关掉演示开关时仍保持死锁），
   以及把兼容路线的合成帧率一并拉满。
+
+## 2026-11-09 性能补丁（游戏前台 + 悬浮窗场景）
+
+目标排序：游戏前台帧率稳定 > 本 App 少占 CPU/内存/磁盘 I/O > 锁帧与保活可靠性不变。
+逐项对着源码复核后，只落地以下 5 处；预期是减少持续性的小开销和状态切换时的
+诊断开销，不承诺可感知的帧率跃升（原包的热路径此前已被社区补丁优化得较深）。
+
+1. `ViewController.swift` — FPS 归一化表改为一次性静态计算。
+   `normalizedMeasuredFPS` 在时钟悬浮窗运行期间每秒被调用约 60 次，原实现每次
+   都新建并过滤 `[30, 45, 60, 75, 80, 90, 100, 120]` 数组；该表只取决于设备
+   最高刷新率，运行期不变，现改为 `standardFrameRates` 静态常量复用。
+
+2. `ViewController.swift` — FPS 变化路径少读一次高刷偏好。
+   `updateMeasuredFPS` 在 FPS 变化分支与其后的确认计算中各读一次
+   `FrameRatePreference.isHighRefreshEnabled`（每次含 2 次 UserDefaults 查询）；
+   现改为在变化分支读一次并传给确认计算。稳态帧（FPS 未变化）行为与开销不变。
+
+3. `ViewController.swift` — 诊断关闭时跳过重型状态文本构建。
+   `updateDiagnosticsPiPState` 原先无条件构建悬浮窗表面/熄屏诊断文本（遍历多个
+   视图与图层、数十个字段格式化），而这些文本的消费者只有调试/诊断导出路径。
+   现仅在调试模式或深度诊断开启时构建；`updateDisplaySleepDiagnostics` 同步加
+   前置守卫，但显式要求写日志的调用（`shouldLog: true`）保持原行为。
+
+4. `AppDebugLogger.swift` — 设备型号改为一次性计算。
+   `deviceModelIdentifier` 原先是计算属性，每写一条调试日志都要重复
+   `uname` + `Mirror` 反射拼字符串；设备型号运行期不变，现改为静态常量。
+   （该路径仅在调试模式开启时执行，属顺手消除的重复开销。）
+
+5. `KeepAliveLogger.swift` — 保活事件历史不再逐条强制刷盘。
+   事件数组写入后原先每次都调用 `UserDefaults.synchronize()`；这些事件仅用于
+   诊断导出，不参与保活判定，现只做普通写入。注意：心跳路径
+   （`heartbeat()`）的 `synchronize()` **刻意保留不动**，因为异常中断推断
+   依赖心跳落盘的新鲜度。
+
+### 复核后未采纳（附理由）
+
+- **`AppDebugLogger.logCritical` 去掉整表写盘 + `synchronize()`**：该入口的设计
+  意图就是在生命周期/内存警告/保活切换时确保最后状态落盘，供下次启动推断异常
+  中断；且它只在调试模式开启时才真正执行，对默认游戏场景零收益，不值得用
+  诊断可靠性换取。
+- **定位保活加 `distanceFilter`**：当前已是 3 公里粗精度档，加距离过滤的省电
+  收益小，却可能让静止状态下长时间收不到定位回调、削弱后台保活可靠性，
+  与「锁帧别断」目标冲突，不动。
+- **自定义合成器逐帧对象分配 / 参考路线渲染尺寸上限**：
+  `ReferenceStyleTimeVideoComposition` 确实逐帧新建颜色空间与 UIColor，
+  `referenceRenderSize` 也确实按源轨道原始尺寸合成；但复核确认这条 pure 路线
+  依赖的预置视频（`fc_ref_*`、`pip_reference_10_1` 等）在当前源码包与用户
+  `_5` IPA 中均不存在（包内无任何 .mov/.mp4 资源），该路线在当前构建中
+  不可达。没有为不可达路径新增覆盖文件；将来若补入预置视频资源，应先做这两项。
+- **去掉统一调度器的 5× 回调循环（all-callbacks-5x）**：2026-11-09 深扫确认
+  必须保留，不可当成冗余“优化”掉。它是该构建的命名特性（源码包即
+  `GlobalRefresh-PiP-all-callbacks-5x-20261028.zip`；`PATCH_NOTES.md` 2026-10-28
+  轮列在“保留不动（用户明确要求）”之下）。逐个 handler 核对过，5× 下均安全：
+  隐藏 tick 按时间戳差推进（同帧重复调用推进为 0）、时钟有文本去重、播放器
+  活性自带 1 秒节流、掉帧监控默认关闭。唯一非幂等的是滚动字
+  （`updateScrollingText` 每次 +1pt）：60 次/秒 × 5 ≈ 300pt/秒，而单调设计值
+  是 60pt/秒——这是自 20261018 起就有的实际速度，不是 bug；日后若嫌滚动太快，
+  正确改法是每步改为 0.2pt，不是去掉 5×。另 `tickCount` 在 10 秒一条的诊断
+  日志里会被 5× 夸大，仅影响一行日志数字，不影响行为。
 
 ## 已知边界（与原版相同，不因本补丁改变）
 
