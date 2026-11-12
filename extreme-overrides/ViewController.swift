@@ -375,12 +375,15 @@ class ViewController: UIViewController, AVPictureInPictureControllerDelegate {
     private var isCompactPiPStyle = true
     private let clockFPSMeasureInterval: CFTimeInterval = 0.8
     private let clockNetworkMeasureInterval: CFTimeInterval = 1.0
+    // Performance patch: UIScreen.main.maximumFramesPerSecond 是硬件常量，运行期不变；
+    // 原先 normalizedMeasuredFPS 每次调用都读一次属性（时钟可见时 300 次/秒），
+    // 提为静态常量。static let 首次访问时懒初始化，线程安全。
+    private static let hardwareMaximumFrameRate = max(60, UIScreen.main.maximumFramesPerSecond)
     // Performance patch: the standard rate table depends only on the device's
     // maximum refresh rate, so compute it once instead of filtering an array
     // on every FPS measurement tick.
     private static let standardFrameRates: [Int] = {
-        let hardwareMaximum = max(60, UIScreen.main.maximumFramesPerSecond)
-        return [30, 45, 60, 75, 80, 90, 100, 120].filter { $0 <= hardwareMaximum }
+        [30, 45, 60, 75, 80, 90, 100, 120].filter { $0 <= hardwareMaximumFrameRate }
     }()
     private var isLoadingHomePreferences = false
     private var hasPreparedPiPInfrastructure = false
@@ -4064,8 +4067,7 @@ class ViewController: UIViewController, AVPictureInPictureControllerDelegate {
     }
 
     private func normalizedMeasuredFPS(_ rawFPS: Int) -> Int {
-        let hardwareMaximum = max(60, UIScreen.main.maximumFramesPerSecond)
-        let clampedFPS = min(max(30, rawFPS), hardwareMaximum)
+        let clampedFPS = min(max(30, rawFPS), Self.hardwareMaximumFrameRate)
         let standardRates = Self.standardFrameRates
         guard let nearest = standardRates.min(by: { abs($0 - clampedFPS) < abs($1 - clampedFPS) }) else {
             return clampedFPS

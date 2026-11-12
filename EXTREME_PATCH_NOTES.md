@@ -158,3 +158,12 @@ Codemagic（`codemagic.yaml` 新增 `ios-unsigned-extreme` 工作流）：
 - 视频编码：`pipBackingCompositionFrameDuration` 在极限锁帧开启时已是 1/屏幕上限；
   自定义合成器逐帧建颜色空间的问题只在不可达的 pure 参考路线（包内无预置视频），
   优化死代码零收益，不动。
+
+## 2026-11-13 元计算微优化（`hardwareMaximumFrameRate` 静态常量）
+
+- `normalizedMeasuredFPS` 原先每次调用都读一次 `UIScreen.main.maximumFramesPerSecond`
+  （时钟可见时 300 次/秒）。该值是硬件常量，运行期不变，提到静态常量
+  `hardwareMaximumFrameRate`（`static let`，首次访问懒初始化，线程安全）；
+  `standardFrameRates` 的初始化闭包也改用同一常量。行为不变，省掉重复属性读取。
+- 视频合成路径（`pipBackingCompositionFrameDuration`、参考路线）里同名读取是
+  一次性装配调用，不在热路径上，留原样。
