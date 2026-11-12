@@ -7,6 +7,12 @@
 #
 # 【极限版追加】解压后会用 extreme-overrides/ 里的同名文件覆盖 pip_swift 源码
 # （极限锁帧开关，见 EXTREME_PATCH_NOTES.md），其余构建步骤与原版一致。
+#
+# 【2026-11-13】新增 ios-unsigned-extreme 工作流：与安全版同源同覆盖，
+# 打包时额外做二进制极限版同款处理（删 Assets.car、图标改走 CFBundleIconFiles、
+# 补 CADisableMinimumFrameDuration），产物为 GlobalRefresh_1.1.1_extreme_unsigned.ipa。
+# 注意：仓库未接 Codemagic webhook，也无 API token；push 不会自动构建，
+# 需在 Codemagic 网页上选 app → Start build → workflow ios-unsigned-extreme → branch main 手动触发。
 
 workflows:
   ios-unsigned-patched:
@@ -36,6 +42,7 @@ workflows:
           grep -q "standardFrameRates" "$SRC_DIR/ViewController.swift"
           grep -q "private static let deviceModelIdentifier" "$SRC_DIR/AppDebugLogger.swift"
           grep -q "Do not force a synchronous preferences flush" "$SRC_DIR/KeepAliveLogger.swift"
+          grep -q "pendingScrollOffsetDelta" "$SRC_DIR/ViewController.swift"
           echo "Extreme-lock and performance overrides applied."
       - name: Install CocoaPods dependencies
         script: |
@@ -59,6 +66,8 @@ workflows:
           set -e
           APP_PATH="$CM_BUILD_DIR/build/pip_swift.xcarchive/Products/Applications/pip_swift.app"
           test -d "$APP_PATH" || { echo "archive .app not found"; exit 1; }
+          # 与二进制安全版 maxframe 一致：补 iPad 对应项（手机项源码 Info.plist 里已有且为 true）
+          /usr/libexec/PlistBuddy -c "Add :CADisableMinimumFrameDuration bool true" "$APP_PATH/Info.plist" || /usr/libexec/PlistBuddy -c "Set :CADisableMinimumFrameDuration true" "$APP_PATH/Info.plist"
           PKG_DIR="$CM_BUILD_DIR/build/ipa-payload"
           rm -rf "$PKG_DIR" && mkdir -p "$PKG_DIR/Payload"
           cp -R "$APP_PATH" "$PKG_DIR/Payload/"
@@ -68,3 +77,78 @@ workflows:
           shasum -a 256 "$CM_BUILD_DIR/build/GlobalRefresh_1.1.1_patched_unsigned.ipa"
     artifacts:
       - build/GlobalRefresh_1.1.1_patched_unsigned.ipa
+  ios-unsigned-extreme:
+    name: iOS unsigned IPA (extreme, foreground-perf + slim)
+    max_build_duration: 60
+    instance_type: mac_mini_m2
+    environment:
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Unzip source bundle
+        script: |
+          set -e
+          unzip -q GlobalRefresh-PiP-all-callbacks-5x-20261028.zip
+          test -d GlobalRefresh-PiP-patched/pip_swift/pip_swift.xcworkspace
+      - name: Apply extreme-lock overrides
+        script: |
+          set -e
+          SRC_DIR="GlobalRefresh-PiP-patched/pip_swift/pip_swift"
+          cp extreme-overrides/FrameRateTestTabBarController.swift "$SRC_DIR/"
+          cp extreme-overrides/UnifiedDisplayLinkDispatcher.swift "$SRC_DIR/"
+          cp extreme-overrides/ViewController.swift "$SRC_DIR/"
+          cp extreme-overrides/AppDebugLogger.swift "$SRC_DIR/"
+          cp extreme-overrides/KeepAliveLogger.swift "$SRC_DIR/"
+          grep -q "ExtremeRefreshLock" "$SRC_DIR/UnifiedDisplayLinkDispatcher.swift"
+          grep -q "pipBackingCompositionFrameDuration" "$SRC_DIR/ViewController.swift"
+          grep -q "standardFrameRates" "$SRC_DIR/ViewController.swift"
+          grep -q "private static let deviceModelIdentifier" "$SRC_DIR/AppDebugLogger.swift"
+          grep -q "Do not force a synchronous preferences flush" "$SRC_DIR/KeepAliveLogger.swift"
+          grep -q "pendingScrollOffsetDelta" "$SRC_DIR/ViewController.swift"
+          echo "Extreme-lock and performance overrides applied."
+      - name: Install CocoaPods dependencies
+        script: |
+          cd GlobalRefresh-PiP-patched/pip_swift
+          pod install
+      - name: Archive without code signing
+        script: |
+          set -e
+          cd GlobalRefresh-PiP-patched/pip_swift
+          xcodebuild \
+            -workspace pip_swift.xcworkspace \
+            -scheme pip_swift \
+            -configuration Release \
+            -sdk iphoneos \
+            -archivePath "$CM_BUILD_DIR/build/pip_swift.xcarchive" \
+            archive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
+      - name: Package unsigned IPA (extreme)
+        script: |
+          set -e
+          APP_PATH="$CM_BUILD_DIR/build/pip_swift.xcarchive/Products/Applications/pip_swift.app"
+          test -d "$APP_PATH" || { echo "archive .app not found"; exit 1; }
+          # 120Hz：补 iPad 对应项（手机项源码里已有且为 true）
+          /usr/libexec/PlistBuddy -c "Add :CADisableMinimumFrameDuration bool true" "$APP_PATH/Info.plist" || /usr/libexec/PlistBuddy -c "Set :CADisableMinimumFrameDuration true" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :GRExtremeOptimized string 2026-11-13 extreme: Assets.car removed, icon via CFBundleIconFiles, scroll writes coalesced 300/s to 60/s" "$APP_PATH/Info.plist" || true
+          # 极限瘦身：删 Assets.car（6.5MB），图标改走 loose PNG。
+          # loose 图标必须在，否则直接报错停掉，不静默出无图标包。
+          test -f "$APP_PATH/AppIcon60x60@2x.png" || { echo "missing loose iPhone icon AppIcon60x60@2x.png, aborting extreme packaging"; exit 1; }
+          test -f "$APP_PATH/AppIcon76x76@2x~ipad.png" || { echo "missing loose iPad icon AppIcon76x76@2x~ipad.png, aborting extreme packaging"; exit 1; }
+          rm -f "$APP_PATH/Assets.car"
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles array" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:0 string AppIcon60x60" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconName" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles array" "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleIcons~ipad:CFBundlePrimaryIcon:CFBundleIconFiles:0 string AppIcon76x76" "$APP_PATH/Info.plist"
+          test ! -e "$APP_PATH/Assets.car" || { echo "Assets.car still present"; exit 1; }
+          PKG_DIR="$CM_BUILD_DIR/build/ipa-payload-extreme"
+          rm -rf "$PKG_DIR" && mkdir -p "$PKG_DIR/Payload"
+          cp -R "$APP_PATH" "$PKG_DIR/Payload/"
+          cd "$PKG_DIR"
+          zip -qry "$CM_BUILD_DIR/build/GlobalRefresh_1.1.1_extreme_unsigned.ipa" Payload
+          echo "--- SHA-256 ---"
+          shasum -a 256 "$CM_BUILD_DIR/build/GlobalRefresh_1.1.1_extreme_unsigned.ipa"
+    artifacts:
+      - build/GlobalRefresh_1.1.1_extreme_unsigned.ipa

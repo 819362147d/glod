@@ -304,6 +304,9 @@ class ViewController: UIViewController, AVPictureInPictureControllerDelegate {
     private var clockRenderTimer: Timer?
     private var pipRuntimeTimer: Timer?
     private var lastScrollTimestamp: CFTimeInterval?
+    // 【前台性能 2026-11-13】滚动字写入合并累加器：统一调度器每帧固定回调 5 次，
+    // 每步累加 0.2pt，满 1pt 才写一次 contentOffset（见 updateScrollingText）。
+    private var pendingScrollOffsetDelta: CGFloat = 0
     private var lastPlayerLayerActivityNudgeAt: CFTimeInterval = 0
     private var lastClockTimestamp: CFTimeInterval?
     private var lastClockNetworkTimestamp: CFTimeInterval?
@@ -3653,6 +3656,7 @@ class ViewController: UIViewController, AVPictureInPictureControllerDelegate {
         // 【社区补丁 2026-10-18】滚动字并入统一调度器（divisor 2 = 60fps）
         guard !UnifiedDisplayLinkDispatcher.shared.isSubscribed(UnifiedDisplayLinkDispatcher.SubscriptionID.pipScroll) else { return }
         lastScrollTimestamp = nil
+        pendingScrollOffsetDelta = 0
         UnifiedDisplayLinkDispatcher.shared.subscribe(id: UnifiedDisplayLinkDispatcher.SubscriptionID.pipScroll, divisor: 2) { [weak self] timestamp, _ in
             self?.updateScrollingText(timestamp: timestamp)
         }
@@ -3663,6 +3667,7 @@ class ViewController: UIViewController, AVPictureInPictureControllerDelegate {
         let hadDisplayLink = UnifiedDisplayLinkDispatcher.shared.isSubscribed(UnifiedDisplayLinkDispatcher.SubscriptionID.pipScroll)
         UnifiedDisplayLinkDispatcher.shared.unsubscribe(UnifiedDisplayLinkDispatcher.SubscriptionID.pipScroll)
         lastScrollTimestamp = nil
+        pendingScrollOffsetDelta = 0
         if hadDisplayLink {
             AppDebugLogger.log("PiP scrolling displayLink stopped")
         }
@@ -3777,6 +3782,11 @@ class ViewController: UIViewController, AVPictureInPictureControllerDelegate {
         lastBackgroundClockDiagnosticsTimestamp = nil
     }
 
+    // 【前台性能 2026-11-13】滚动字写入合并：统一调度器每帧固定回调 5 次，原先每次
+    // 都 +1pt 写 contentOffset（300 次/秒，每次都触发 UITextView 布局），实际速度
+    // 300pt/秒，是设计值 60pt/秒的 5 倍（EXTREME_PATCH_NOTES 11-09 节：正确改法是
+    // 每步 0.2pt，不是去掉 5×）。现每步累加 0.2pt，满 1pt 才写一次：速度回到设计值
+    // 60pt/秒，布局写操作从 300 次/秒降到 60 次/秒；前台游戏少抢 CPU，滚动视觉速度不变。
     private func updateScrollingText(timestamp: CFTimeInterval) {
         guard !isContentExtremeModeEnabled, let textView, isScrollingEnabled, !shouldRenderClockMode, shouldRunPiPContentUpdates else {
             stopDisplayLinks()
@@ -3784,6 +3794,9 @@ class ViewController: UIViewController, AVPictureInPictureControllerDelegate {
         }
         lastScrollTimestamp = timestamp
 
+        pendingScrollOffsetDelta += 0.2
+        guard pendingScrollOffsetDelta >= 1.0 else { return }
+        pendingScrollOffsetDelta -= 1.0
         let offsetY = textView.contentOffset.y
         textView.contentOffset = CGPoint(x: 0, y: offsetY + 1)
         if textView.contentOffset.y > textView.contentSize.height {

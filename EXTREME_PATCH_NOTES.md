@@ -105,3 +105,39 @@
 - 死锁 120 与锁 60 内容帧率不同步时可能出现一快一慢的卡顿（原版 README 已注明），
   介意时关掉开关即恢复原版自适应行为。
 - 本补丁未经真机编译验证：以 Codemagic 构建成功为准；若构建报错，把日志发回再修。
+
+## 2026-11-13 前台性能（滚动字写入合并）+ Codemagic extreme 工作流
+
+目标：游戏在前台、PiP 悬浮窗在后台时，本 App 少抢 CPU，让前台游戏拿到最多的设备性能；滚动视觉速度不变。
+
+改动（`extreme-overrides/ViewController.swift`，仅 `updateScrollingText` + 1 个累加属性）：
+
+- 统一调度器每帧固定回调 5 次，原先每次都 +1pt 写 `contentOffset`（300 次/秒，
+  每次都触发 UITextView 布局），实际速度 300pt/秒，是设计值 60pt/秒的 5 倍。
+- 现每步累加 0.2pt（11-09 节认定的正确改法），满 1pt 才写一次：速度回到设计值
+  60pt/秒，布局写操作从 300 次/秒降到 60 次/秒。`pendingScrollOffsetDelta`
+  在 `startDisplayLinks` / `stopDisplayLinks` 里随 `lastScrollTimestamp` 一起清零。
+- 5× 回调循环本身不动（11-09 已确认必须保留）；`lastScrollTimestamp` 只写不读，
+  其语义未变。
+
+复核后未采纳（附理由）：
+
+- **调度器 `step()` 里每轮 5 次上锁复查**：约 1200 次锁操作/秒，全是无竞争 NSLock，
+  合计约 0.1ms/秒；改锁纪律会动 11-07 审计肯定的防崩快照语义，收益可忽略，不动。
+- **时钟订阅 divisor 2→6**：`updateClockDisplay` 每调用一次多半是廉价守卫提前返回
+  （`Date()` + 字符串比较，DateFormatter 最多 10 次/秒），降频省不下什么，
+  却会让 FPS 读数在刷新率切换时确认变慢（24 个样本从 0.4 秒拖到 1.2 秒），不动。
+- **`UIRequiresFullScreen`**：iPhone 上是空操作（无分屏），iPad 上会杀掉多任务；
+  前台游戏在 iPhone 上零收益，不动。
+- **SnapKit 符号表**：约 175KB，Mach-O 手工截断风险大，收益约 100KB（压缩后），不动。
+
+Codemagic（`codemagic.yaml` 新增 `ios-unsigned-extreme` 工作流）：
+
+- 与安全版 `ios-unsigned-patched` 同源同覆盖；打包时额外做二进制极限版同款处理：
+  删 `Assets.car`（6.5MB）、图标改走 `CFBundleIconFiles`（loose PNG 必须在，
+  否则构建直接报错停掉，不静默出无图标包）、补 `CADisableMinimumFrameDuration`。
+- 安全版打包步骤也补了 `CADisableMinimumFrameDuration`（与二进制 maxframe 版一致）。
+- 触发方式：仓库未接 Codemagic webhook，也无 API token，push 不会自动构建；
+  在 Codemagic 网页选 app → Start build → workflow `ios-unsigned-extreme` →
+  branch `main` 手动触发。构建成功即编译验证通过；产物下载后按二进制极限版
+  同款清单校验（解压、plist 回读、cryptid、SHA256），再挂 passpor。
