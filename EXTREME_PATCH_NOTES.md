@@ -141,3 +141,20 @@ Codemagic（`codemagic.yaml` 新增 `ios-unsigned-extreme` 工作流）：
   在 Codemagic 网页选 app → Start build → workflow `ios-unsigned-extreme` →
   branch `main` 手动触发。构建成功即编译验证通过；产物下载后按二进制极限版
   同款清单校验（解压、plist 回读、cryptid、SHA256），再挂 passpor。
+
+## 2026-11-13 编码优化（保活静音重编码）
+
+- `slience.mp3`（保活静音，`BackgroundTaskManager/` 下）原为 64kbps MP3，
+  81,216 字节、10.152 秒、8kHz 单声道。静音内容用 64kbps 纯属浪费，
+  重编码为 8kbps：10,557 字节，时长同为 10.152 秒，同样 MP3 8kHz 单声道，
+  解码验证仍为静音（max_volume -91dB，听不见）。
+- 文件名、格式、时长都不变，`BackgroundTaskManager` 按名加载不受影响。
+  仅极限版用：`extreme-overrides/slience.mp3` + `ios-unsigned-extreme`
+  工作流新增 `Apply extreme audio encoding` 步骤覆盖；安全版不动。
+- 诚实数字：IPA 只小了 174 字节（918,781 → 918,607），因为 zip 本来就把
+  静音压得很小；省的是安装后体积（约 70KB），不是下载体积。
+- 编译器编码：Release 已是 `SWIFT_OPTIMIZATION_LEVEL = -O` + wholemodule
+ （Debug 才是 `-Onone`），Codemagic 用 `-configuration Release`，编译器优化已开。
+- 视频编码：`pipBackingCompositionFrameDuration` 在极限锁帧开启时已是 1/屏幕上限；
+  自定义合成器逐帧建颜色空间的问题只在不可达的 pure 参考路线（包内无预置视频），
+  优化死代码零收益，不动。
